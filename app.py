@@ -1,6 +1,7 @@
 import streamlit as st 
 import json
 import re 
+import os # <<< NameError 해결: os 모듈 추가
 from datetime import datetime, date, time as dt_time
 from typing import Dict, List
 import google.generativeai as genai 
@@ -9,36 +10,68 @@ from math import floor # floor 함수를 명시적으로 임포트
 # 🔧 2026년 리포트 생성용 상수 (현재 시스템 날짜 대신 사용)
 TARGET_YEAR = 2026
 
-# --------------------------------------------------------------------------
-# [TIER IMPORT] 모듈화된 파일에서 핵심 로직을 가져옵니다.
-# --------------------------------------------------------------------------
+# ==========================================================================
+# 🛑 [START] 모듈 로드 및 API 키 로드 로직 (오류 발생 부분 수정)
+# ==========================================================================
+
+# 💡 Tier Import와 API 키 로직을 하나의 안전한 try 블록 안에 배치합니다.
 try:
-    # Tier 4/3 공통 상수 임포트
+    # ----------------------------------------------------------------------
+    # 1. TIER IMPORT (모듈화된 파일에서 핵심 로직을 가져옵니다.)
+    # ----------------------------------------------------------------------
     from saju_data import TEN_GAN_PERSONA
-    
-    # 🔧 수정: saju_engine_final.py에서 정확한 SajuEngine 사용
     from saju_engine_final import SajuEngine, TIME_ZONE, calculate_pillar_sipsin
-    
-    # Tier 3: AI 분석 메인 로직 (SajuEngine 제외)
     from analysis_core_final import (
         get_final_ai_prompt, load_clinical_data, 
         analyze_ai_report, get_system_instruction, calculate_sewoon_sipsin
     )
-    # Tier 2: HTML 템플릿 및 데이터 주입 함수
     from report_generator import generate_report_html, generate_free_report_html, generate_premium_report_html
+    
+    # ----------------------------------------------------------------------
+    # 2. API 키 로드 로직 (환경 변수 우선)
+    # ----------------------------------------------------------------------
+    
+    # Codespaces Secrets (환경 변수)에서 GOOGLE_API_KEY 또는 GEMINI_API_KEY를 시도
+    api_key_from_env = os.environ.get("GOOGLE_API_KEY")
+    if not api_key_from_env:
+        api_key_from_env = os.environ.get("GEMINI_API_KEY")
 
+    api_key = api_key_from_env
 
-    # API 키 로드 (로컬 환경 지원)
-    try:
-        from config import GEMINI_API_KEY as CONFIGURED_API_KEY
-    except ImportError:
-        CONFIGURED_API_KEY = None
-        
+    # 2순위: config.py 파일 (로컬 환경에서만 사용)
+    CONFIGURED_API_KEY = None
+    if not api_key:
+        try:
+            from config import GEMINI_API_KEY as CONFIGURED_API_KEY
+            api_key = CONFIGURED_APIKEY
+        except ImportError:
+            pass # config.py 없으면 무시
+
+    # 3순위: Streamlit Secrets 파일 (.streamlit/secrets.toml) 확인
+    if not api_key:
+        try:
+            api_key = st.secrets.get("GEMINI_API_KEY", "")
+        except Exception:
+            api_key = ""
+            
+    # 최종적으로 키가 확보되었다면, session_state에 저장하고 SDK를 초기화합니다.
+    if api_key:
+        st.session_state['api_key'] = api_key
+        # 🔑 Gemini SDK 초기화 (여기가 키를 사용하는 핵심 부분)
+        genai.configure(api_key=api_key) 
+    
     MODULES_READY = True
+
 except ImportError as e:
+    # 모듈 임포트 실패 시 (SyntaxError가 아닌 모듈 없음 오류만 여기서 잡힘)
     CONFIGURED_API_KEY = None
     st.error(f"❌ 아키텍처 파일 로드 실패: {e}. analysis_core_final.py에 analyze_ai_report, get_system_instruction 함수를 추가했는지 확인해주세요.")
     MODULES_READY = False
+
+# ==========================================================================
+# 🛑 [END] 모듈 로드 및 API 키 로드 로직
+# ==========================================================================
+
 
 # --------------------------------------------------------------------------
 # UI 헬퍼 클래스 (Tier 1) - 오행 색상 및 간지 맵핑
@@ -46,7 +79,6 @@ except ImportError as e:
 class UIEngineHelper:
     """Streamlit UI 표시를 위한 헬퍼 클래스"""
     def __init__(self):
-        # 오행 맵핑 (UI용)
         self.jiji_o_heng_map = {'寅': 'wood', '卯': 'wood', '辰': 'earth', '巳': 'fire', '午': 'fire', '未': 'earth', '申': 'metal', '酉': 'metal', '戌': 'earth', '亥': 'water', '子': 'water', '丑': 'earth', '甲':'wood', '乙':'wood', '丙':'fire', '丁':'fire', '戊':'earth', '己':'earth', '庚':'metal', '辛':'metal', '壬':'water', '癸':'water'}
         self.color_map = {'wood':'#388E3C', 'fire':'#D32F2F', 'earth':'#FBC02D', 'metal':'#757575', 'water':'#1976D2'}
         self.hanja_to_kr = {'甲':'갑', '乙':'을', '丙':'병', '丁':'정', '戊':'무', '己':'기', '庚':'경', '辛':'신', '壬':'임', '癸':'계', '子':'자', '丑':'축', '寅':'인', '卯':'묘', '辰':'진', '巳':'사', '午':'오', '未':'미', '申':'신', '酉':'유', '戌':'술', '亥':'해'}
@@ -62,7 +94,7 @@ UI_ENG = UIEngineHelper()
 
 
 # 🚨 [최종 수정] Session State 초기화 로직을 Streamlit 스크립트의 최상단으로 이동합니다.
-# 이로써 render_app() 외부의 st.session_state 참조가 초기화 이전에 발생하는 오류를 방지합니다.
+if 'api_key' not in st.session_state: st.session_state.api_key = "" # API 키 세션 상태 추가
 if 'events_text' not in st.session_state: st.session_state.events_text = ""
 if 'last_result' not in st.session_state: st.session_state.last_result = None
 if 'manse_info' not in st.session_state: st.session_state.manse_info = None
@@ -130,7 +162,7 @@ def render_saju_pillars(manse_info: Dict, ten_gods_array: List[Dict], ui_eng: UI
         {'title': '시주(말년)', 'ganji': manse_info['시주'], 'ten': ten_gods_array[3]}, 
         {'title': '일주(본인)', 'ganji': manse_info['일주'], 'ten': ten_gods_array[2]}, 
         {'title': '월주(청년)', 'ganji': manse_info['월주'], 'ten': ten_gods_array[1]}, 
-        {'title': '년주(초년)', 'ganji': manse_info['년주'], 'ten': ten_gods_array[0]}  
+        {'title': '년주(초년)', 'ganji': manse_info['년주'], 'ten': ten_gods_array[0]}   
     ]
     cols = st.columns(4)
     for i, p in enumerate(pillars_list):
@@ -188,7 +220,7 @@ def render_daewoon_sewoon(dw: Dict, manse_info: Dict, curr_age: int):
     dw_start_age = current_dw_start_age[0] if current_dw_start_age else dw['대운_간지_배열'][0]['age']
     # 🔧 수정: datetime.now().year 대신 TARGET_YEAR 사용
     current_dw_start_year = TARGET_YEAR - (curr_age - dw_start_age)
-            
+             
     engine = SajuEngine()
     sewoon_list = engine.get_sewoon(current_dw_start_year, 10)
     sewoon_cols = st.columns(10)
@@ -222,16 +254,22 @@ def render_app():
         
     st.set_page_config(page_title="희구소 운영 시스템", page_icon="🔮", layout="wide")
     
-    # Streamlit Secrets에서 API 키 로드
-    api_key = CONFIGURED_API_KEY
-    if not api_key:
-        try:
-            api_key = st.secrets.get("GEMINI_API_KEY", "")
-        except:
-            api_key = "" 
+    # --- 파비콘 수정 로직 (이미지 URL 반영) ---
+    favicon_url = "https://i.ibb.co/vxZfjJvJ/1.png"
+    st.markdown(
+        f"""
+        <link rel="icon" href="{favicon_url}">
+        """,
+        unsafe_allow_html=True,
+    )
+    
+    # 🔑 키 로드 (Session State에서 가져옵니다)
+    api_key = st.session_state.get('api_key')
 
-    # 🚨 세션 상태는 이미 함수 외부에서 초기화되었으므로 여기서는 추가 초기화가 필요 없습니다.
-        
+    # 🚨 API 키 체크는 여기서 최종적으로 확인합니다.
+    if not api_key:
+        st.error("❌ Gemini API 키가 설정되지 않아 분석을 진행할 수 없습니다.")
+    
     # --- CSS 스타일 ---
     st.markdown("""
     <style>
@@ -270,14 +308,27 @@ def render_app():
                 b_minute = st.selectbox("분", list(range(0, 60)), index=15, format_func=lambda x: f"{x:02d}분")
             target_time = dt_time(b_hour, b_minute)
             
-            # 참고용 시진 표시
+            # 🕰️ 수정: 참고용 시진 표시 (정확한 2시간 단위 시진 반영)
             sijin_names = ["자시", "축시", "인시", "묘시", "진시", "사시", "오시", "미시", "신시", "유시", "술시", "해시"]
-            if b_hour == 23 or b_hour == 0:
-                current_sijin = "자시(子時)"
-            else:
-                sijin_idx = (b_hour + 1) // 2
-                current_sijin = f"{sijin_names[sijin_idx]}({['子','丑','寅','卯','辰','巳','午','未','申','酉','戌','亥'][sijin_idx]}時)"
+            
+            # 현재 시를 분까지 합산하여 2시간(120분) 단위로 나눕니다.
+            total_minutes = b_hour * 60 + b_minute
+            
+            # 23시 30분을 0시 0분으로 가정하고 전체 시간을 30분 앞당겨 계산
+            # (명리학에서 자시는 23:30부터 시작하므로, 30분을 빼서 보정)
+            adjusted_minutes = total_minutes - 30 
+            if adjusted_minutes < 0:
+                adjusted_minutes += 24 * 60 # 00:00 ~ 00:29 (전날의 해시)를 23:30 ~ 23:59로 처리
+            
+            # 2시간 단위 시진 인덱스 계산 (120분 = 1시진)
+            sijin_idx = floor(adjusted_minutes / 120) % 12
+            
+            # 명리학 지지 12자 (자, 축, 인, 묘...)
+            sijin_kr_hanja = ['子','丑','寅','卯','辰','巳','午','未','申','酉','戌','亥']
+            
+            current_sijin = f"{sijin_names[sijin_idx]}({sijin_kr_hanja[sijin_idx]}時)"
             st.caption(f"📍 해당 시진: {current_sijin}")
+
         
         st.markdown("---")
         job = st.selectbox("직업", ["직장인", "사업가", "프리랜서", "주부", "학생", "무직"])
@@ -307,7 +358,8 @@ def render_app():
     st.title("Hidden Luck Lab : 희구소")
     st.markdown("#### 🎓 운영자 전용 대시보드")
     
-    if not api_key:
+    # 키 로드 상태를 체크합니다.
+    if not st.session_state.get('api_key'):
         st.error("❌ Gemini API 키가 설정되지 않아 분석을 진행할 수 없습니다.")
         
     if btn:
@@ -315,7 +367,7 @@ def render_app():
             st.error("상담 주제와 질문 1은 필수 입력 항목입니다.")
             return
             
-        if not api_key:
+        if not st.session_state.get('api_key'):
              return
 
         # 1. 필수 변수 정의 및 나이 계산
@@ -330,7 +382,7 @@ def render_app():
         # 🔧 한국식 세는 나이 계산 (태어나자마자 1살, 새해가 되면 +1)
         # 예: 1985년 10월 29일생 → 2025년 현재 41세 (2025 - 1985 + 1)
         today = date.today()
-        curr_age = today.year - b_date.year + 1  # 한국 나이: 출생연도와 현재연도 차이 + 1
+        curr_age = today.year - b_date.year + 1 # 한국 나이: 출생연도와 현재연도 차이 + 1
         
         gender_code = 'F' if gender == '여성' else 'M'
         st.session_state.curr_age = curr_age
@@ -359,6 +411,7 @@ def render_app():
                 full_q = f"주제:{','.join(topics)}, Q1:{q1}, Q2:{q2 if q2 else '없음'}"
                 
                 # 2-2. AI 분석 요청
+                api_key = st.session_state['api_key'] # 🔑 세션에서 키를 다시 가져옴
                 result_json = analyze_ai_report(manse_info, daewoon_info, full_q, profile_data, st.session_state.events_text, eng, api_key) 
                 
                 # 2-3. 결과 저장 및 HTML 패키지 구성
@@ -372,7 +425,7 @@ def render_app():
                     if curr_age >= d['age'] and curr_age < d['age'] + 10:
                         current_dw_start_year = TARGET_YEAR - (curr_age - d['age'])
                         break
-                
+                        
                 # 세운 10년치 정보 생성 (HTML 템플릿에 주입)
                 sewoon_10yr_list = eng.get_sewoon(current_dw_start_year, 10)
                 sewoon_ganji_map = {sw['year']: sw['ganji'] for sw in sewoon_10yr_list}
@@ -391,7 +444,7 @@ def render_app():
                         ],
                         "ten_gods_result": manse_info['십성_결과_배열'], 
                         "day_master": manse_info['일주'][0],
-                        "customer_name": name,  # 🔧 고객명 추가
+                        "customer_name": name, # 🔧 고객명 추가
                         "curr_age": curr_age, 
                         "daewoon_list": dw_list_for_html,
                         "current_dw_start_year": current_dw_start_year,
@@ -627,28 +680,28 @@ def render_app():
         col1, col2 = st.columns(2)
 
         with col1:
-         st.markdown("#### 🎁 무료 미리보기")
-         free_html = generate_free_report_html(st.session_state.report_package_data)
-         st.download_button(
-                label="📄 무료 리포트 다운로드",
-             data=free_html.encode('utf-8'),
-             file_name=f"{name}_무료사주_2026.html",
-             mime="text/html",
-                key='download_free_btn'
-            )
-        st.caption("✨ 간단한 운세 미리보기 (5개 섹션)")
+           st.markdown("#### 🎁 무료 미리보기")
+           free_html = generate_free_report_html(st.session_state.report_package_data)
+           st.download_button(
+                 label="📄 무료 리포트 다운로드",
+               data=free_html.encode('utf-8'),
+               file_name=f"{name}_무료사주_2026.html",
+               mime="text/html",
+                 key='download_free_btn'
+             )
+           st.caption("✨ 간단한 운세 미리보기 (5개 섹션)")
 
         with col2:
-         st.markdown("#### 💎 프리미엄 리포트")
-         premium_html = generate_premium_report_html(st.session_state.report_package_data)
-         st.download_button(
-            label="💎 프리미엄 리포트 다운로드 (₩29,000)",
-            data=premium_html.encode('utf-8'),
-            file_name=f"{name}_프리미엄사주_2026.html",
-            mime="text/html",
-            key='download_premium_btn'
-         )
-         st.caption("🌟 전체 분석 + 6개 특별 섹션 (재물 타이밍, 심리 해소 등)")
+           st.markdown("#### 💎 프리미엄 리포트")
+           premium_html = generate_premium_report_html(st.session_state.report_package_data)
+           st.download_button(
+             label="💎 프리미엄 리포트 다운로드 (₩29,000)",
+             data=premium_html.encode('utf-8'),
+             file_name=f"{name}_프리미엄사주_2026.html",
+             mime="text/html",
+             key='download_premium_btn'
+           )
+           st.caption("🌟 전체 분석 + 6개 특별 섹션 (재물 타이밍, 심리 해소 등)")
         st.info("💡 차이점: 무료(5개 섹션) vs 프리미엄(11개 섹션 + 액션 플랜)")
 
         st.markdown("""<p style="text-align:center; color:#888; margin-top:10px; font-size:0.9rem;">* 주의: **반드시 위 다운로드 버튼을 사용하여 고객에게 파일을 전달해 주세요.**</p>""", unsafe_allow_html=True)
@@ -688,7 +741,11 @@ def render_app():
                     """
                     
                     try:
-                        genai.configure(api_key=api_key)
+                        api_key_chat = st.session_state.get('api_key') # 채팅 시에도 api_key 사용
+                        if not api_key_chat:
+                             raise ValueError("API Key is missing for chat")
+                             
+                        genai.configure(api_key=api_key_chat)
                         model = genai.GenerativeModel('gemini-2.5-flash')
                         resp = model.generate_content(follow_up_prompt, generation_config={
                             "temperature": 0.4,
@@ -713,7 +770,7 @@ def render_app():
                         "response": follow_up_response
                     })
                     
-                    st.rerun() 
+                    st.rerun()  
 
 
 if __name__ == "__main__":
